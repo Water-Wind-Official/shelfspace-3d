@@ -9,7 +9,7 @@ export default function ShelfSpace3D() {
 
             <h1>ShelfSpace 3D</h1>
 
-            {/* Takes us back to the page with the Next.js logo */}
+            {/* Takes us back to the home page */}
             <Link href="/">Back to home</Link>
 
 
