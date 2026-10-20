@@ -1,258 +1,388 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
+import ItemForm from "@/components/shelf-space/ItemForm";
+import { createExampleData, loadOrganizer, saveOrganizer } from "@/lib/shelfspace-data";
+import type { ItemDetails, OrganizerData, Shelf } from "@/lib/shelfspace-types";
+import "./organizer.css";
 
 
-// One item has a name and a location we can look up later.
-type Item = {
-    id: string;
-    name: string;
-    type: string;
-    room: string;
-    shelf: string;
-};
+// Three.js needs the browser. The rest of the page can load while it starts.
+const Scene = dynamic(() => import("@/components/shelf-space/Scene"), {
+    ssr: false,
+    loading: () => <p className="ss-scene-message" role="status">Opening the 3D view...</p>,
+});
 
-const storageKey = "shelfspace-items";
+const emptyData: OrganizerData = { rooms: [], shelves: [], items: [] };
 
 
 export default function ShelfSpace3D() {
 
-    const [items, setItems] = useState<Item[]>([]);
-
-    // These hold what the user is typing into the form.
-    const [name, setName] = useState("");
-    const [itemType, setItemType] = useState("Book");
-    const [room, setRoom] = useState("");
-    const [shelf, setShelf] = useState("");
-    const [search, setSearch] = useState("");
-
+    // This is the shared collection. The scene and forms both read from it.
+    const [data, setData] = useState<OrganizerData>(emptyData);
     const [loaded, setLoaded] = useState(false);
-    const [formError, setFormError] = useState("");
+    const [roomId, setRoomId] = useState("");
+    const [shelfId, setShelfId] = useState("");
+    const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+
+    const [roomName, setRoomName] = useState("");
+    const [shelfName, setShelfName] = useState("");
+    const [levels, setLevels] = useState(3);
+    const [slots, setSlots] = useState(5);
+    const [search, setSearch] = useState("");
+    const [viewNumber, setViewNumber] = useState(0);
+    const [formNumber, setFormNumber] = useState(0);
+
+    const [error, setError] = useState("");
     const [storageError, setStorageError] = useState("");
+    const [notice, setNotice] = useState("");
 
 
-    // Get this browser's saved list when the page first opens.
     useEffect(() => {
         try {
-            const saved = localStorage.getItem(storageKey);
-
-            if (saved) {
-                const savedItems = JSON.parse(saved);
-
-                // Don't try to display a saved list with missing fields.
-                if (!Array.isArray(savedItems) || savedItems.some((item) =>
-                    !item ||
-                    typeof item.id !== "string" ||
-                    typeof item.name !== "string" ||
-                    typeof item.type !== "string" ||
-                    typeof item.room !== "string" ||
-                    typeof item.shelf !== "string"
-                )) {
-                    throw new Error("The saved item list is invalid.");
-                }
-
-                setItems(savedItems);
-            }
+            const saved = loadOrganizer();
+            setData(saved);
+            setRoomId(saved.rooms[0]?.id ?? "");
+            setShelfId(saved.shelves.find((shelf) => shelf.roomId === saved.rooms[0]?.id)?.id ?? "");
         } catch {
-            setStorageError("Saved items could not be opened. Adding an item will start a new list.");
+            setStorageError("The saved layout could not be opened. It has been left untouched. Creating a new room will start a new layout.");
         }
-
         setLoaded(true);
     }, []);
 
 
-    function saveItems(nextItems: Item[]) {
-        setItems(nextItems);
+    function updateData(nextData: OrganizerData, message: string) {
+        setData(nextData);
+        setError("");
+        setNotice(message);
 
-        // This is local browser storage for now. The database can take over later.
+        // Swap these storage functions for API calls when the database is ready.
         try {
-            localStorage.setItem(storageKey, JSON.stringify(nextItems));
+            saveOrganizer(nextData);
             setStorageError("");
         } catch {
-            setStorageError("Browser saving is unavailable. Changes will be lost when you leave this page.");
+            setStorageError("Browser saving is unavailable. Your changes work in this page, but will be lost when you leave.");
         }
     }
 
 
-    function addItem(event: FormEvent<HTMLFormElement>) {
-        event.preventDefault();  // Keep the form from reloading the whole page.
+    const room = data.rooms.find((entry) => entry.id === roomId);
+    const roomShelves = data.shelves.filter((shelf) => shelf.roomId === roomId);
+    const roomItems = data.items.filter((item) => roomShelves.some((shelf) => shelf.id === item.shelfId));
+    const shelf = roomShelves.find((entry) => entry.id === shelfId);
+    const selectedItem = data.items.find((item) => item.id === selectedItemId) ?? null;
 
-        if (!loaded) return;
+    // Room names in the dropdown make it possible to move items between rooms.
+    const formShelves = data.shelves.map((entry) => ({
+        ...entry,
+        name: `${data.rooms.find((entryRoom) => entryRoom.id === entry.roomId)?.name} / ${entry.name}`,
+    }));
 
-        if (!name.trim() || !room.trim() || !shelf.trim()) {
-            setFormError("Enter an item name, room, and shelf. Spaces alone don't count.");
-            return;
+
+    function selectRoom(id: string) {
+        setRoomId(id);
+        setShelfId(data.shelves.find((entry) => entry.roomId === id)?.id ?? "");
+        setSelectedItemId(null);
+        setError("");
+    }
+
+    function selectShelf(id: string) {
+        setShelfId(id);
+        setSelectedItemId(null);
+    }
+
+    function selectItem(id: string | null) {
+        setSelectedItemId(id);
+        const item = data.items.find((entry) => entry.id === id);
+        const itemShelf = data.shelves.find((entry) => entry.id === item?.shelfId);
+        if (itemShelf) {
+            setRoomId(itemShelf.roomId);
+            setShelfId(itemShelf.id);
+        }
+    }
+
+
+    function addRoom(event: FormEvent<HTMLFormElement>) {
+        event.preventDefault();
+        const name = roomName.trim();
+        if (!name) return setError("Give the room a name. Spaces alone don't count.");
+        if (data.rooms.some((entry) => entry.name.toLowerCase() === name.toLowerCase())) {
+            return setError("That room name is already in use.");
         }
 
-        const newItem: Item = {
-            id: crypto.randomUUID(),
-            name: name.trim(),
-            type: itemType,
-            room: room.trim(),
-            shelf: shelf.trim(),
+        const newRoom = { id: crypto.randomUUID(), name };
+        updateData({ ...data, rooms: [...data.rooms, newRoom] }, `Created ${name}. Add a shelf next.`);
+        setRoomId(newRoom.id);
+        setShelfId("");
+        setSelectedItemId(null);
+        setRoomName("");
+    }
+
+
+    function addShelf(event: FormEvent<HTMLFormElement>) {
+        event.preventDefault();
+        if (!room) return setError("Create or select a room first.");
+        const name = shelfName.trim();
+        if (!name) return setError("Give the shelf a name. Spaces alone don't count.");
+        if (roomShelves.some((entry) => entry.name.toLowerCase() === name.toLowerCase())) {
+            return setError("That shelf name is already in this room.");
+        }
+        if (!Number.isInteger(levels) || levels < 1 || levels > 6 || !Number.isInteger(slots) || slots < 1 || slots > 8) {
+            return setError("Use 1 to 6 levels and 1 to 8 positions per level.");
+        }
+
+        const newShelf: Shelf = { id: crypto.randomUUID(), roomId, name, levels, slots };
+        updateData({ ...data, shelves: [...data.shelves, newShelf] }, `Created ${name}.`);
+        setShelfId(newShelf.id);
+        setSelectedItemId(null);
+        setShelfName("");
+    }
+
+
+    function saveItem(details: ItemDetails): string | null {
+        const destination = data.shelves.find((entry) => entry.id === details.shelfId);
+        if (!details.name.trim()) return "Enter an item name. Spaces alone don't count.";
+        if (!destination) return "Choose a shelf first.";
+        if (!Number.isInteger(details.level) || details.level < 0 || details.level >= destination.levels ||
+            !Number.isInteger(details.slot) || details.slot < 0 || details.slot >= destination.slots) {
+            return "Choose a level and position inside this shelf.";
+        }
+
+        // One item per position keeps the first version easy to arrange.
+        const occupied = data.items.some((item) => item.id !== selectedItemId &&
+            item.shelfId === details.shelfId && item.level === details.level && item.slot === details.slot);
+        if (occupied) return "That position is occupied. Choose an open position.";
+
+        const savedItem = {
+            ...details,
+            id: selectedItem?.id ?? crypto.randomUUID(),
+            name: details.name.trim(),
+            description: details.description.trim(),
         };
+        const items = selectedItem
+            ? data.items.map((item) => item.id === selectedItem.id ? savedItem : item)
+            : [...data.items, savedItem];
 
-        saveItems([...items, newItem]);
-        setFormError("");
-        setName("");
-
-        // Keep the room and shelf filled in so adding the next item is easier.
+        updateData({ ...data, items }, `${savedItem.name} ${selectedItem ? "updated" : "added"}.`);
+        setRoomId(destination.roomId);
+        setShelfId(destination.id);
+        if (!selectedItem) setFormNumber((number) => number + 1);
+        return null;
     }
 
 
     function removeItem(id: string) {
-        const remainingItems = items.filter((item) => item.id !== id);
-        saveItems(remainingItems);
+        updateData({ ...data, items: data.items.filter((item) => item.id !== id) }, "Item removed.");
+        if (selectedItemId === id) setSelectedItemId(null);
     }
 
-    const searchText = search.trim().toLowerCase();
-    const visibleItems = items.filter((item) =>
-        `${item.name} ${item.type} ${item.room} ${item.shelf}`
-            .toLowerCase().includes(searchText)
-    );
+    function removeShelf() {
+        if (!shelf || data.items.some((item) => item.shelfId === shelf.id)) return;
+        const shelves = data.shelves.filter((entry) => entry.id !== shelf.id);
+        updateData({ ...data, shelves }, "Empty shelf removed.");
+        setShelfId(shelves.find((entry) => entry.roomId === roomId)?.id ?? "");
+        setSelectedItemId(null);
+    }
+
+    function removeRoom() {
+        if (!room || roomShelves.length > 0) return;
+        const rooms = data.rooms.filter((entry) => entry.id !== room.id);
+        updateData({ ...data, rooms }, "Empty room removed.");
+        const nextRoom = rooms[0]?.id ?? "";
+        setRoomId(nextRoom);
+        setShelfId(data.shelves.find((entry) => entry.roomId === nextRoom)?.id ?? "");
+        setSelectedItemId(null);
+    }
+
+    function loadExample() {
+        // The example button is only offered when there are no rooms to replace.
+        if (data.rooms.length > 0) return;
+        const example = createExampleData();
+        updateData(example, "Example collection loaded. You can edit it or add your own rooms.");
+        setRoomId(example.rooms[0].id);
+        setShelfId(example.shelves[0].id);
+        setSelectedItemId(null);
+    }
+
+
+    const query = search.trim().toLowerCase();
+    const visibleItems = query ? data.items.filter((item) => {
+        const itemShelf = data.shelves.find((entry) => entry.id === item.shelfId);
+        const itemRoom = data.rooms.find((entry) => entry.id === itemShelf?.roomId);
+        return `${item.name} ${item.type} ${item.description} ${itemShelf?.name} ${itemRoom?.name}`.toLowerCase().includes(query);
+    }) : roomItems;
+    const shelfHasItems = data.items.some((item) => item.shelfId === shelfId);
 
 
     return (
-        <main className="mx-auto max-w-3xl space-y-8 p-6">
+        <main className="ss-page">
+            <div className="ss-shell">
 
-            <header className="space-y-2">
-                <h1 className="text-2xl font-bold">ShelfSpace 3D</h1>
-                <Link href="/" className="underline">Back to home</Link>
-                <p>Keep track of your items and where they are stored.</p>
-                <p className="text-sm">Items are saved in this browser only.</p>
-            </header>
+                <header className="ss-header">
+                    <div>
+                        <p className="ss-eyebrow">Collection workspace</p>
+                        <h1>ShelfSpace 3D</h1>
+                        <p className="ss-subtitle">A place for everything. See where it belongs.</p>
+                    </div>
+                    <div className="ss-header-links">
+                        <span className="ss-badge">Saved in this browser</span>
+                        <Link href="/" className="ss-home-link">Back to home</Link>
+                    </div>
+                </header>
 
-            {storageError && <p role="alert">{storageError}</p>}
-
-
-            <section aria-labelledby="organizer-heading" className="space-y-2">
-
-                <h2 id="organizer-heading" className="text-xl font-semibold">Organizer</h2>
-
-                {/* The team's 3D scene will go in this spot later. */}
-                <div className="rounded border border-dashed p-6">
-                    <p>3D view will go here.</p>
+                <div className="ss-messages" aria-live="polite">
+                    {!loaded && <p role="status">Opening your collection...</p>}
+                    {notice && <p role="status">{notice}</p>}
+                    {storageError && <p className="ss-error" role="alert">{storageError}</p>}
+                    {error && <p className="ss-error" role="alert">{error}</p>}
                 </div>
 
-            </section>
 
+                <div className="ss-workspace">
+                    <aside className="ss-panel ss-locations" aria-labelledby="locations-title">
+                        <p className="ss-eyebrow">Your space</p>
+                        <h2 id="locations-title">Rooms & shelves</h2>
 
-            <section aria-labelledby="add-heading" className="space-y-3">
-
-                <h2 id="add-heading" className="text-xl font-semibold">Add an item</h2>
-
-                <form onSubmit={addItem} className="space-y-3">
-                    <fieldset disabled={!loaded} className="grid gap-3 sm:grid-cols-2">
-
-                        <label>
-                            Item name
-                            <input
-                                className="block w-full rounded border p-2"
-                                value={name}
-                                onChange={(event) => setName(event.target.value)}
-                                required
-                            />
-                        </label>
-
-                        <label>
-                            Type
-                            <select
-                                className="block w-full rounded border bg-background p-2"
-                                value={itemType}
-                                onChange={(event) => setItemType(event.target.value)}
-                            >
-                                <option>Book</option>
-                                <option>Gemstone</option>
-                                <option>Painting</option>
-                                <option>Model</option>
-                                <option>Other</option>
+                        <label className="ss-field">
+                            Current room
+                            <select value={roomId} disabled={!loaded || !data.rooms.length} onChange={(event) => selectRoom(event.target.value)}>
+                                {!data.rooms.length && <option value="">No rooms yet</option>}
+                                {data.rooms.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}
                             </select>
                         </label>
 
-                        <label>
-                            Room
-                            <input
-                                className="block w-full rounded border p-2"
-                                placeholder="Example: Exhibit Room 1"
-                                value={room}
-                                onChange={(event) => setRoom(event.target.value)}
-                                required
-                            />
-                        </label>
+                        <form onSubmit={addRoom} className="ss-small-form">
+                            <label className="ss-field">
+                                New room name
+                                <input value={roomName} onChange={(event) => setRoomName(event.target.value)} required disabled={!loaded} placeholder="e.g. Mineral Gallery" />
+                            </label>
+                            <button className="ss-button ss-button-secondary" disabled={!loaded}>Create room</button>
+                        </form>
 
-                        <label>
-                            Shelf or display case
-                            <input
-                                className="block w-full rounded border p-2"
-                                placeholder="Example: Shelf A"
-                                value={shelf}
-                                onChange={(event) => setShelf(event.target.value)}
-                                required
-                            />
-                        </label>
+                        {loaded && !data.rooms.length && (
+                            <button type="button" className="ss-button ss-button-primary" onClick={loadExample}>Start with an example</button>
+                        )}
 
-                    </fieldset>
-
-                    {formError && <p role="alert">{formError}</p>}
-                    <button type="submit" disabled={!loaded} className="rounded border px-4 py-2 disabled:opacity-50">
-                        Add item
-                    </button>
-                </form>
-
-            </section>
-
-
-            <section aria-labelledby="items-heading" className="space-y-3">
-
-                <h2 id="items-heading" className="text-xl font-semibold">Items ({items.length})</h2>
-
-                <label className="block">
-                    Search by name, type, room, or shelf
-                    <input
-                        type="search"
-                        className="block w-full rounded border p-2"
-                        value={search}
-                        onChange={(event) => setSearch(event.target.value)}
-                    />
-                </label>
-
-                {!loaded ? (
-                    <p role="status">Loading saved items...</p>
-                ) : items.length === 0 ? (
-                    <p>No items yet. Add your first item above.</p>
-                ) : visibleItems.length === 0 ? (
-                    <p>No items match your search.</p>
-                ) : (
-                    <ul className="space-y-3">
-
-                        {/* Each saved item gets its own row. */}
-                        {visibleItems.map((item) => (
-                            <li key={item.id} className="flex flex-wrap items-center justify-between gap-3 rounded border p-3">
-                                <div className="min-w-0 break-words">
-                                    <h3 className="font-semibold">{item.name}</h3>
-                                    <p>{item.type}</p>
-                                    <p>Room: {item.room} — Shelf / case: {item.shelf}</p>
-                                </div>
-
-                                <button
-                                    type="button"
-                                    onClick={() => removeItem(item.id)}
-                                    aria-label={`Remove ${item.name}`}
-                                    className="rounded border px-3 py-1"
-                                >
-                                    Remove
+                        <div className="ss-divider" />
+                        <h3>Shelves in this room</h3>
+                        <div className="ss-shelf-list">
+                            {roomShelves.map((entry) => (
+                                <button type="button" key={entry.id} aria-pressed={shelfId === entry.id}
+                                    className={`ss-shelf-button ${shelfId === entry.id ? "ss-selected" : ""}`} onClick={() => selectShelf(entry.id)}>
+                                    <span>{entry.name}</span>
+                                    <small>{data.items.filter((item) => item.shelfId === entry.id).length} / {entry.levels * entry.slots} positions</small>
                                 </button>
-                            </li>
-                        ))}
+                            ))}
+                            {!roomShelves.length && <p className="ss-note">Add a shelf to give your items a place.</p>}
+                        </div>
 
-                    </ul>
-                )}
+                        <form onSubmit={addShelf} className="ss-small-form">
+                            <fieldset disabled={!loaded || !room}>
+                                <label className="ss-field">
+                                    New shelf or case name
+                                    <input value={shelfName} onChange={(event) => setShelfName(event.target.value)} required placeholder="e.g. Display A" />
+                                </label>
+                                <div className="ss-form-grid">
+                                    <label className="ss-field">Levels
+                                        <input type="number" min="1" max="6" value={levels} onChange={(event) => setLevels(Number(event.target.value))} required />
+                                    </label>
+                                    <label className="ss-field">Positions / level
+                                        <input type="number" min="1" max="8" value={slots} onChange={(event) => setSlots(Number(event.target.value))} required />
+                                    </label>
+                                </div>
+                                <button className="ss-button ss-button-secondary">Create shelf</button>
+                            </fieldset>
+                        </form>
 
-            </section>
+                        <details className="ss-cleanup">
+                            <summary>Remove empty spaces</summary>
+                            <p className="ss-note">Remove items before deleting a shelf. Remove shelves before deleting a room.</p>
+                            <button type="button" className="ss-button ss-button-secondary" disabled={!shelf || shelfHasItems} onClick={removeShelf}>Remove empty shelf</button>
+                            <button type="button" className="ss-button ss-button-secondary" disabled={!room || roomShelves.length > 0} onClick={removeRoom}>Remove empty room</button>
+                        </details>
+                    </aside>
 
+
+                    <div className="ss-center">
+                        <section className="ss-panel ss-view-panel" aria-labelledby="view-title">
+                            <div className="ss-section-header">
+                                <div>
+                                    <p className="ss-eyebrow">Room view</p>
+                                    <h2 id="view-title">{room?.name ?? "Your next collection starts here"}</h2>
+                                </div>
+                                <button type="button" className="ss-button ss-button-secondary" onClick={() => setViewNumber(viewNumber + 1)} disabled={!room}>Reset view</button>
+                            </div>
+                            <div className="ss-scene">
+                                {loaded && room ? (
+                                    <Scene key={`${roomId}:${roomShelves.length}:${viewNumber}`} room={room} shelves={roomShelves} items={roomItems}
+                                        selectedItemId={selectedItemId} selectedShelfId={shelfId}
+                                        onSelectItem={selectItem} onSelectShelf={selectShelf} />
+                                ) : <p className="ss-scene-message">Create a room or load the example to begin.</p>}
+                            </div>
+                            <p className="ss-view-help">Drag to look around · Scroll or pinch to zoom · Select an item to edit it</p>
+                            <div className="ss-room-summary">
+                                <span>{roomShelves.length} shelves</span><span>{roomItems.length} items</span>
+                                <span>{roomShelves.reduce((total, entry) => total + entry.levels * entry.slots, 0) - roomItems.length} open positions</span>
+                            </div>
+                        </section>
+
+
+                        <section className="ss-panel" aria-labelledby="items-title">
+                            <div className="ss-section-header">
+                                <h2 id="items-title">{query ? "Search results" : "Items in this room"}</h2>
+                                <span className="ss-count">{visibleItems.length}</span>
+                            </div>
+                            <label className="ss-field ss-search">
+                                Search all rooms
+                                <input type="search" placeholder="Find an item, room, or shelf..." value={search} onChange={(event) => setSearch(event.target.value)} />
+                            </label>
+
+                            <ul className="ss-item-list">
+                                {visibleItems.map((item) => {
+                                    const itemShelf = data.shelves.find((entry) => entry.id === item.shelfId);
+                                    const itemRoom = data.rooms.find((entry) => entry.id === itemShelf?.roomId);
+                                    return (
+                                        <li key={item.id} className={selectedItemId === item.id ? "ss-item-row ss-selected" : "ss-item-row"}>
+                                            <button type="button" className="ss-item-select" onClick={() => selectItem(item.id)} aria-pressed={selectedItemId === item.id}>
+                                                <span className={`ss-type-dot ss-type-${item.type.toLowerCase()}`} aria-hidden="true" />
+                                                <span><strong>{item.name}</strong><small>{itemRoom?.name} / {itemShelf?.name} · Level {item.level + 1}, Position {item.slot + 1}</small></span>
+                                            </button>
+                                            <span className="ss-item-type">{item.type}</span>
+                                            <button type="button" className="ss-remove" aria-label={`Remove ${item.name}`} onClick={() => removeItem(item.id)}>Remove</button>
+                                        </li>
+                                    );
+                                })}
+                            </ul>
+                            {loaded && !visibleItems.length && <p className="ss-empty">{query ? "No items match your search." : "No items here yet. Add one using the item form."}</p>}
+                        </section>
+                    </div>
+
+
+                    <aside className="ss-panel ss-editor" aria-labelledby="editor-title">
+                        <div className="ss-section-header">
+                            <div>
+                                <p className="ss-eyebrow">Item details</p>
+                                <h2 id="editor-title">{selectedItem ? "Edit selected item" : "Add an item"}</h2>
+                            </div>
+                            {selectedItem && <button type="button" className="ss-button ss-button-secondary" onClick={() => setSelectedItemId(null)}>New item</button>}
+                        </div>
+                        <p className="ss-note">Choose a shelf, level, and open position. Saving updates the 3D view too.</p>
+
+                        {/* Barcode lookup can pass item details into this same form later. */}
+                        <ItemForm key={selectedItem ? `edit:${selectedItem.id}` : `add:${shelfId}:${formNumber}`}
+                            shelves={formShelves} items={data.items} item={selectedItem} defaultShelfId={shelfId}
+                            onSave={saveItem} onCancel={() => setSelectedItemId(null)} disabled={!loaded || !data.shelves.length} />
+
+                        {selectedItem && <button type="button" className="ss-button ss-button-danger" onClick={() => removeItem(selectedItem.id)}>Remove selected item</button>}
+                        {!data.shelves.length && <p className="ss-note">Create a room and shelf first.</p>}
+                    </aside>
+                </div>
+
+                <footer className="ss-footer">Working team template · Changes are saved on this device and browser.</footer>
+            </div>
         </main>
     );
-
 }
